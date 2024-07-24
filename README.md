@@ -1,5 +1,9 @@
 # Swedish Companies Dataset with Machine Learning Techniques
 
+## Link to the dataset
+
+https://www.kaggle.com/datasets/weedof79/swedish-companies-dataset
+
 ## Introduction
 
 Once I completed a series of online courses about data science and machine learning, I was eager to put my knowledge into practice to show others what I am capable of achieving.
