@@ -1,4 +1,4 @@
-# Valerio "Weed" Malerba, Uppsala, 2023-2024
+# Valerio Malerba, Uppsala, 2023-2024
 
 # This script reads raw data in form of CSVs and clean them, creating a dataset that can be suited for machine learning and data analysis.
 
@@ -9,512 +9,26 @@ import datetime
 from geopy.geocoders import Nominatim
 import numpy as np
 
-def Read_data(folder, max_rows, earliest_year):
-    # This function looks for .csv files in the folder, which are expected to contain the raw web-scraped data.
-    frames = [] # List of dataframes created out of each .csv
-    earliest_year
-    # Scan the folder to find all the files to be read
-    df = pd.DataFrame()
-    for file in os.listdir(folder):
-        if len(df) >= max_rows and max_rows != -1:
-            break
-        else:
-            if file.endswith('.csv'):
-                file_path = os.path.join(folder, file)
-                try:
-                    # Read the content of the CSV and put it in a dataframe
-                    print("Reading", file_path.split('\\')[-1])
-                    df = pd.read_csv(file_path, encoding='utf-16', sep=';', on_bad_lines='skip', low_memory=False)
-                    frames.append(df)
-                except Exception as e:
-                    print(f"Error reading {file}: {e}")
-    # Merge all the dataframes
-    print("Concatenating dataframes...")
-    concatenated_raw_data = pd.concat(frames, ignore_index=True)
-    if max_rows == -1:
-        return concatenated_raw_data
-    elif max_rows >= 0:
-        return concatenated_raw_data.head(max_rows)
-    else:
-        print("Max rows error")
-        return concatenated_raw_data.head(0)
+# CONSTANTS
 
-def Data_cleaning_1(df, earliest_year, sorted_columns_translation_table, activity_types_translation_table):
-    # The purpose of this first cleaning is to clean the data to make it suitable for manual analysis.
-    # The process doesn't alter the content of the raw data.
-    # The data is processed only if the source isn't empty
-    if len(df):
-        # Remove the duplicates by using the organization number
-        print("Dropping duplicates...")
-        df = df.drop_duplicates(subset='orgnr')
-        # Sorting the columns to have the KPIs first
-        print("Sorting columns...")
-        sorted_columns = [col for col in list(sorted_columns_translation_table.keys()) if col in df.columns]
-        df = df[sorted_columns]
-
-        # Rename the columns with english names
-        print("Translating columns...")
-        df.columns = list(sorted_columns_translation_table.values())
-
-        # Translate the activity types in english
-        print("Translating activity types...")
-        df['category'] = df['category'].map(activity_types_translation_table)
-
-        # Drop some columns that have little meaning
-        drop_columns = ['orgnr', 'abv_hgrupp', 'linkTo', "Minoritetsintressen_2015", "Minoritetsintressen_2016", "Minoritetsintressen_2017", "Minoritetsintressen_2018", "Minoritetsintressen_2020"]
-        columns_to_drop = set(df.columns).intersection(drop_columns)
-        print("Dropping useless columns:", columns_to_drop)
-        df = df.drop(columns=columns_to_drop)
-
-        # Delete years columns that aren't requested
-        years_to_drop = list(map(str, range(2011, earliest_year)))
-        print("Dropping useless years:", years_to_drop)
-        df = df.loc[:, ~df.columns.str.endswith(tuple(years_to_drop))]
-
-        # Iterate over all columns and replace values only if they are strings and the column ends with a specific year
-        # Some columns containing percentage values are converted to integer
-        for col in df.columns:
-            if any(year in col for year in map(str, range(2011, 2023))):
-                print("Removing %, commas, spaces and converting to integers:", col)
-                # Remove the percentage symbol, replace comma with dot, and spaces with an empty string;
-                # finally, convert all values to integers. Note: percentage values are converted to integers taking into account the two decimal places present in the original data.
-                df[col] = df[col].apply(lambda x: pd.to_numeric(str(x).replace(' ', '').rstrip('%').replace(',', '.'), errors='coerce'))
-        return df
-
-def Data_cleaning_2(df, unrelevant_features, lat_bins = 10, long_bins = 2):
-    # This second cleaning process performs changes in the dataset.
-    # This function alters the original features, to make them more suitable for machine learning.
-    # Since the companies are uniquely identified by the new index, the juridical name is now useless and can be dropped
-    # Note: the default values of lat_bins and long_bins are meant to roughly match the number of swedish counties and resembles Sweden's oblong shape as well.
-    
-    print("Dropping juridical name...")
-    df = df.drop(["juridical name"], axis = 1)
-    
-    # The municipal seat is actually not very interesting, so it will be used only to fill the empty cells under "location", then dropped.
-    print("Merging location and municipal seat...")
-    df['location'] = df['location'].fillna(df["municipal seat"])
-    df = df.drop(["municipal seat"], axis = 1)
-
-    # Unfortunately there are several features that are mostly incomplete. For this reason, they are dropped rather than being completed
-    unrelevant_features = [col for col in unrelevant_features if col in df.columns]
-    print(f"Dropping unrelevant features: {unrelevant_features}")
-    df = df.drop(unrelevant_features, axis = 1)
-
-    # Status can be mapped to ordinals:
-    print("Converting status to ordinals...")
-    status_mapping = {"Bolaget är aktivt": 2, "Bolaget är inaktivt": 1, "Registrerad": -1} # -1 = only registered, probably recently bankrupted or liquidated
-    df['Status'] = df['Status'].map(status_mapping)
-    df = df.dropna(subset=['Status'])
-    
-    # The column with the registration date can be converted to an integer with just the year (month and day are not relevant for this dataset)
-    print("Converting company registration date to integer...")
-    df['registration year'] = pd.to_datetime(df['registration year'], errors='coerce').dt.year
-
-    # The ownership can also be mapped to ordinals:
-    print("Converting ownership to ordinals...")
-    ownership_mapping = {"Privat, ej börsnoterat": 1, "-": -1} # 1 = not in stock exchange; -1 = deregistered; everything else becomes nan
-    df['ownership'] = df['ownership'].map(ownership_mapping)
-    df['ownership'] = df['ownership'].fillna(0)
-
-    # The categories can be converted to ordinals
-    print("Converting categories to ordinals...")
-    category_mapping = {category: idx for idx, category in enumerate(df["category"].unique())}
-    df["category"] = df["category"].map(category_mapping)
-
-    # Managing the locations: the location feature can be replaced by two columns containing the corresponding coordinates.
-    # This can be done with the help of another dataframe, called Coordinates.
-    print("Replacing locations with coordinates...")
-    df = pd.merge(df, Coordinates[['Location', 'Latitude', 'Longitude']], left_on='location', right_on='Location', how='left')
-    df = df.drop(['location', 'Location'], axis=1)
-    df = df.rename(columns={'Latitude': 'latitude', 'Longitude': 'longitude'})
-    # For the purpose of machine learning, the exact coordinates aren't as meaningful as a coarse approximation can be
-    # The latitude is split into lat_bins bands, while the longitude into long_bins bands.
-    print("Grouping the coordinates into bins...")
-    latitude_bins = pd.cut(df['latitude'], bins=lat_bins, labels=False, include_lowest=True)
-    longitude_bins = pd.cut(df['longitude'], bins=long_bins, labels=False, include_lowest=True)
-    df['latitude_bin'] = latitude_bins
-    df['longitude_bin'] = longitude_bins
-    df = df.drop(['latitude', 'longitude'], axis=1)
-    # Convert latitude and longitude in a sort of univocal, scalar region code
-    print("Converting the coordinates bins into region codes...")
-    df['region_ID'] = df['latitude_bin'] * long_bins + df['longitude_bin']
-    # Then the regional code is remapped in order to have a series without gaps
-    region_ID_mapping = {region_ID: idx for idx, region_ID in enumerate(df["region_ID"].unique())}
-    df['region_ID'] = df['region_ID'].map(region_ID_mapping)
-    df = df.drop(['latitude_bin', 'longitude_bin'], axis=1)
-
-    # Delete all the rows that contain too many NaNs. Before counting the NaNs, it's good to replace all those ones which are caused by the recent registration of a company.
-    # Example: a company created in 2020 will have all the features related to earlier years set to NaN. This would inflate the count of NaNs illicitly.
-    for col in df.columns:
-        current_feature_split =col.split("_")
-        if "20" in col:
-            current_feature_year =  int(current_feature_split[-1])
-        else:
-            current_feature_year = 9999
-        # The features dealing with years before the registration year are set to 0. In this way, all their NaNs are replaced,
-        # while the NaNs in features with data from years after the registration year remain and will be handled later in the script.
-        df[col] = np.where(df['registration year'] > current_feature_year, 0, df[col])
-    # Now a new column with the count is created:
-    print("Deleting hollow companies...")
-    # Add a column (numbered 0) with the count of NaNs in each row.
-    df = pd.concat([df, df.isna().sum(axis=1)], axis=1)
-    # Then all the rows where NaNs are more than 33% the dataframe's width are deleted
-    df = df[df[0] <= int(len(df.columns) * 0.33)]
-    df = df.drop(0, axis=1)
-
-    # Delete all the years with too much missing data
-    print("Deleting hollow years...")
-    for year in range(2012, 2023):
-        missing_rate = Missing_data_rate(df, str(year))
-        if missing_rate >= 50:
-            columns_to_be_kept = df.filter(regex='^(?!.*_' + str(year) + '$)')
-            df = df.loc[:, columns_to_be_kept.columns]
-
-    # Remove "-" from the organization number, making it an integer
-    print("Converting organization numbers to integers...")
-    df.loc[:, "organization number"] = df["organization number"].str.replace("-", "").astype(np.int64)
-    # Set the organization number as index
-    print("Setting organization numbers as index...")
-    df.set_index(df.columns[0], inplace=True)
-
-    # Now it's time to fill all the empty data points. There are a bunch of criteria which are used according to a arbitrary hierarchy:
-    # 1) All the data points dealing with years before the corresponding registration year are set to 0 (done))
-    # 2) If the feature refers to a year and both the previous and the next years are available and have numbers, the replacement is the average of the two corresponding values in past and future.
-    # 3) If only the previous year is available, its corresponding value is used as the replacement.
-    # 4) If only the next year is available, its corresponding value is used as the replacement.
-    # 5) If there isn't adjacent and valid data, the replacement is the median value calculated on the subset with the same category.
-    # This is because the median values of each feature seem to greatly depend by the feature "category", so a fixed value wouldn't fit realistically as much as a specific value for certain subcategories.
-    # Note: this insight has been obtained with help of Scan_stat_variation function defined later.
-    # 6) If even the category median is a nan, the replacement is the general median over the whole current column.
-    print("Replacing nans...")
-    # The KPIs can be excluded from the column scan, since they can be calculated precisely out of the guessed source values instead of being guessed as well.
-    # This is done just for a matter of data consistency.
-    KPI_columns = pd.core.indexes.base.Index(['Net revenue per employee_2012',
-                                                'Net revenue per employee_2013',
-                                                'Net revenue per employee_2014',
-                                                'Net revenue per employee_2015',
-                                                'Net revenue per employee_2016',
-                                                'Net revenue per employee_2017',
-                                                'Net revenue per employee_2018',
-                                                'Net revenue per employee_2019',
-                                                'Net revenue per employee_2020',
-                                                'Net revenue per employee_2021',
-                                                'Net revenue per employee_2022',
-                                                'Personnel costs per employee_2012',
-                                                'Personnel costs per employee_2013',
-                                                'Personnel costs per employee_2014',
-                                                'Personnel costs per employee_2015',
-                                                'Personnel costs per employee_2016',
-                                                'Personnel costs per employee_2017',
-                                                'Personnel costs per employee_2018',
-                                                'Personnel costs per employee_2019',
-                                                'Personnel costs per employee_2020',
-                                                'Personnel costs per employee_2021',
-                                                'Personnel costs per employee_2022',
-                                                'EBITDA_2012',
-                                                'EBITDA_2013',
-                                                'EBITDA_2014',
-                                                'EBITDA_2015',
-                                                'EBITDA_2016',
-                                                'EBITDA_2017',
-                                                'EBITDA_2018',
-                                                'EBITDA_2019',
-                                                'EBITDA_2020',
-                                                'EBITDA_2021',
-                                                'EBITDA_2022',
-                                                'Net revenue change_2012',
-                                                'Net revenue change_2013',
-                                                'Net revenue change_2014',
-                                                'Net revenue change_2015',
-                                                'Net revenue change_2016',
-                                                'Net revenue change_2017',
-                                                'Net revenue change_2018',
-                                                'Net revenue change_2019',
-                                                'Net revenue change_2020',
-                                                'Net revenue change_2021',
-                                                'Net revenue change_2022',
-                                                'DuPont model_2012',
-                                                'DuPont model_2013',
-                                                'DuPont model_2014',
-                                                'DuPont model_2015',
-                                                'DuPont model_2016',
-                                                'DuPont model_2017',
-                                                'DuPont model_2018',
-                                                'DuPont model_2019',
-                                                'DuPont model_2020',
-                                                'DuPont model_2021',
-                                                'DuPont model_2022',
-                                                'Profit margin_2012',
-                                                'Profit margin_2013',
-                                                'Profit margin_2014',
-                                                'Profit margin_2015',
-                                                'Profit margin_2016',
-                                                'Profit margin_2017',
-                                                'Profit margin_2018',
-                                                'Profit margin_2019',
-                                                'Profit margin_2020',
-                                                'Profit margin_2021',
-                                                'Profit margin_2022',
-                                                'Gross profit margin_2012',
-                                                'Gross profit margin_2013',
-                                                'Gross profit margin_2014',
-                                                'Gross profit margin_2015',
-                                                'Gross profit margin_2016',
-                                                'Gross profit margin_2017',
-                                                'Gross profit margin_2018',
-                                                'Gross profit margin_2019',
-                                                'Gross profit margin_2020',
-                                                'Gross profit margin_2021',
-                                                'Gross profit margin_2022',
-                                                'Working capital/revenue_2012',
-                                                'Working capital/revenue_2013',
-                                                'Working capital/revenue_2014',
-                                                'Working capital/revenue_2015',
-                                                'Working capital/revenue_2016',
-                                                'Working capital/revenue_2017',
-                                                'Working capital/revenue_2018',
-                                                'Working capital/revenue_2019',
-                                                'Working capital/revenue_2020',
-                                                'Working capital/revenue_2021',
-                                                'Working capital/revenue_2022',
-                                                'Solvency_2012',
-                                                'Solvency_2013',
-                                                'Solvency_2014',
-                                                'Solvency_2015',
-                                                'Solvency_2016',
-                                                'Solvency_2017',
-                                                'Solvency_2018',
-                                                'Solvency_2019',
-                                                'Solvency_2020',
-                                                'Solvency_2021',
-                                                'Solvency_2022',
-                                                'Quick ratio_2012',
-                                                'Quick ratio_2013',
-                                                'Quick ratio_2014',
-                                                'Quick ratio_2015',
-                                                'Quick ratio_2016',
-                                                'Quick ratio_2017',
-                                                'Quick ratio_2018',
-                                                'Quick ratio_2019',
-                                                'Quick ratio_2020',
-                                                'Quick ratio_2021',
-                                                'Quick ratio_2022'
-                                                ])
-    for col in df.columns.difference(KPI_columns):
-        # Set current_feature_year according to the year contained in the current feature (column name)
-        # previous_feature_year and next_feature_year are calculated consequently.
-        current_feature_split = col.split("_")
-        if "20" in col:
-            current_feature_year = current_feature_split[-1]
-            previous_feature_year = current_feature_split[0] + "_" + str(int(current_feature_year) - 1)
-            next_feature_year = current_feature_split[0] + "_" + str(int(current_feature_year) + 1)
-        else:
-            current_feature_year = "9999"
-            previous_feature_year = "9999"
-            next_feature_year = "9999"
-        # If the current feature year has both a predecessor and a successor, the nans are possibly replaced by the average of these two values
-        if previous_feature_year in df.columns and next_feature_year in df.columns:
-            # Both the previous and the next year may exist for the current feature; however, one or both of them may be nans as well.
-            # This would mean to replace a nan with another nan.
-            replace_values = (df[previous_feature_year] + df[next_feature_year]) / 2
-            # Eventually either df[previous_feature_year] or df[next_feature_year] contain a nan, which causes a nan even in replace_values.
-            # A simple way to replace even these residual nans is to replace them with the average over all the years of the same feature type:
-            columns_to_average = [current_feature_split[0] + f"_{year}" for year in range(2012, 2023) if current_feature_split[0] + "_" + str(year) in df.columns]
-            replace_values = replace_values.fillna(df[columns_to_average].mean(axis = 1))
-            # Now that a series without nans has been obtained, it's time to use it to replace the nans in the main dataframe
-            df[col] = df[col].fillna(replace_values)
-        # Otherwise, the predecessor or the successor is used.
-        elif previous_feature_year in df.columns:
-            df[col] = df[col].fillna(df[previous_feature_year])
-            # However, even this series can contain nans, so this must be handled.
-            columns_to_average = [current_feature_split[0] + f"_{year}" for year in range(2012, 2023) if current_feature_split[0] + "_" + str(year) in df.columns]
-            replace_values = df[columns_to_average].mean(axis = 1)
-            df[col] = df[col].fillna(replace_values)
-        elif next_feature_year in df.columns:
-            df[col] = df[col].fillna(df[next_feature_year])
-            # However, even this series can contain nans, so this must be handled: the mean value of the whole row is used.
-            columns_to_average = [current_feature_split[0] + f"_{year}" for year in range(2012, 2023) if current_feature_split[0] + "_" + str(year) in df.columns]
-            replace_values = df[columns_to_average].mean(axis = 1).fillna(0) # In the case of a whole row of nans, the values are replaced with zeros.
-            df[col] = df[col].fillna(replace_values)
-        elif "20" in col:
-        # The case where no values in the closest years are available: the nans are here replaced by the median over the corresponding category
-        # This is because the median values for certain features are quite specific for the category the company belongs to.
-        # Note: this applies only to "year-features", so others like Status are skipped, since they all should have valid values already. 
-            # Create a dictionary with the medians of the current column, calculated over each category
-            category_median = df.groupby('category')[col].agg('median').to_dict()
-            # Map the category with the corresponding medians
-            mapped_category_median = df['category'].map(category_median)
-            # The mapped series just defined can be used to fill the nans, since both df[col] and mapped_category_median have the same indexes.
-            df[col] = df[col].fillna(mapped_category_median)
-            # However, especially if the dataset is little and thus there isn't valid data in a whole category, the median itself can be a nan.
-            # So, one more fill is needed, this time the general median value of the whole column.
-            # In case the whole row is made of nans, then the median would be a nan as well, so these are replaced by zeros.
-            df[col] = df[col].fillna(df[col].median()).fillna(0)
-            # At this point, it would be still possible to have nans left, if the whole column the median is calculated over is made of nans.
-            # However, such empty columns have already been dropped in the cleaning steps above.
-
-    # After having replaced all the nans, the remaining ones in the KPI columns can be calculated in this second column scan:
-    # As stated before, the features dealing with KPIs are calcutated out of other features; for consistency reasons, they can be calculated here,
-    # instead of estimating their value with the same criteria used for filling the nans in the other features.
-    KPI_df = pd.DataFrame()
-    for col in KPI_columns:
-        if col in df.columns:
-            current_feature_year = col.split("_")[-1]
-            # Each KPI is rebuilt by using the proper formulas
-            print("Updating", col)
-            if 'EBITDA' in col:
-                # EBITDA is calculated as EBIT before depreciation and amortization. Here the values are not recalculated, except when they are nan.
-                # Those nans are replaced with the corresponding EBIT
-                KPI_df[col] = df['EBITDA_' + current_feature_year].fillna(df['EBIT_' + current_feature_year])
-            elif 'Solvency' in col:
-                # Infinite solvencies are replaced with zeros or hundreds, depending by the sign
-                # Nans are due to years before the founding year, so the solvency is set to 100% by default, in such cases.
-                KPI_df[col] = round(100 * (df['Equity_' + current_feature_year] + 0.786 * df['Untaxed reserves_' + current_feature_year]) / df['Liabilities and equity_' + current_feature_year], 2).replace(-np.inf, 0).replace(np.inf, 100).fillna(100.0)
-            # The net revenue per employee might not be in the dataset because of it's often almost empty and so it's dropped previously by the algorithm
-            elif 'Net revenue per employee' in col:
-                # If there are no employees, the company is considered as it has one
-                Current_employees = df['Number of employees_' + current_feature_year].replace({0: 1})
-                KPI_df[col] = df['Net revenue_' + current_feature_year] / Current_employees
-            elif 'Net revenue change_' in col:
-                # Infinite changes are replaced by zeros;
-                # if either the previous or the current net revenues aren't available, the column is set to 0.
-                Current_net_revenue = 'Net revenue_' + current_feature_year
-                Previous_net_revenue = 'Net revenue_' + str(int(current_feature_year) - 1)
-                if Current_net_revenue in df.columns and Previous_net_revenue in df.columns:
-                    KPI_df[col] = round((df[Current_net_revenue] / df[Previous_net_revenue] - 1) * 100, 2).replace([np.inf, -np.inf], 0).fillna(0.0)
-                else:
-                    KPI_df[col] = pd.Series([0] * len(df), name = col, index = df.index)
-            elif 'DuPont model' in col:
-                # The Dupont model is calculated as Profit margin x Net revenue, divided by the sum of all the assets; NaNs are replaced with zeros,
-                # while -inf and inf are replaced with the double of the minimum value in the column and the maximum respectively.
-                # This is done to avoid infinite values that can't be fed in certain machine learning algorhitms but, at the same time, provide meaningful replacements.
-                Dupont_noinfs = df["Profit margin_" + current_feature_year] * df["Net revenue_" + current_feature_year] / (df["Subscribed unpaid capital_" + current_feature_year] + df["Fixed assets_" + current_feature_year] + df["Current assets_" + current_feature_year])
-                Dupont_noinfs = Dupont_noinfs.replace([-np.inf, np.inf], np.nan).dropna()
-                KPI_df[col] = round(df["Profit margin_" + current_feature_year] * df["Net revenue_" + current_feature_year] / (df["Subscribed unpaid capital_" + current_feature_year] + df["Fixed assets_" + current_feature_year] + df["Current assets_" + current_feature_year]), 2).replace(np.nan, 0).replace(-np.inf, 2 * min(Dupont_noinfs)).replace(np.inf, 2 * max(Dupont_noinfs))
-            elif 'Profit margin' in col:
-                # The source data seems to use mostly the EBIT to calculate the profit margin: 90% of the entries have a difference between generated and original within 1%.
-                # However, sometimes (maybe due to errors in the balance sheet) the profit margin seems to be calculated by using the profit after financial items.
-                KPI_df[col] = round(100 * df["EBIT_" + current_feature_year] / df["Net revenue_" + current_feature_year], 2).replace([np.nan, np.inf, -np.inf], 0)
-            elif 'Gross profit margin' in col:
-                # Nans in gross profit margin are usually due to lack of revenue and can't be calculated, so they are replaced with zeros
-                KPI_df[col] = df[col].fillna(0.0)
-            elif 'Working capital/revenue' in col:
-                # The working capital is defined as Current assets minus Short-term liabilities, divided by the net revenue.
-                # NaNs are replaced with zeros, while -inf and inf are replaced with the double of the minimum value in the column and the maximum respectively.
-                # This is done to avoid infinite values that can't be fed in certain machine learning algorhitms but, at the same time, provide meaningful replacements.
-                working_capital = df['Current assets_' + current_feature_year] - df['Short-term liabilities_' + current_feature_year]
-                working_capital_revenue = 100 * working_capital / df['Net revenue_' + current_feature_year]
-                working_capital_revenue_noinfs = working_capital_revenue.replace([-np.inf, np.inf], np.nan).dropna()
-                max_working_capital_revenue = max(working_capital_revenue_noinfs)
-                min_working_capital_revenue = min(working_capital_revenue_noinfs)
-                KPI_df[col] = round(working_capital_revenue.replace(-np.inf, 2 * min_working_capital_revenue).replace(np.inf, 2 * max_working_capital_revenue), 2).replace(np.nan, 0)
-            elif 'Quick ratio' in col:
-                # If there are no short-term liabilities, the quick ratio is set conventionally to 100%
-                KPI_df[col] = round((df['Current assets_' + current_feature_year] / df['Short-term liabilities_' + current_feature_year]).replace([np.inf, -np.inf, np.nan], 100), 2)
-            elif 'Personnel costs per employee' in col:
-                # The personnel costs' definition is company-dependent. It includes salary, social costs as well as other benefits that aren't available in this dataset.
-                # The principle applied here is to leave the values as they are and only replace the nans. The nans are replaced, where possible, with the mean value over the row of personnel costs per employee.
-                # If the mean personnel costs per employee is a nan as well (e. g. because all the items in the mean count are nans), it's replaced with 0.
-                mean_personnel_costs_per_employee = df.filter(like = 'Personnel costs per employee').mean(axis = 1).fillna(0)
-                KPI_df[col] = df['Personnel costs per employee_' + current_feature_year].fillna(mean_personnel_costs_per_employee)
-
-            # else:
-            #     print()
-            # Those who got a nan, because of e. g. division by zero, are set to zero
-    # Update the KPI columns in the main dataframe
-    df.update(KPI_df)
-    return df, category_mapping, region_ID_mapping, latitude_bins, longitude_bins
-
-def Excel_with_template(df, filename):
-    # Export to Excel by using a hard-coded file as a template
-    try:
-        template_path = 'Template.xlsx'
-        template_wb = load_workbook(template_path)
-        # Select or create a sheet in the template (replace 'Sheet1' with the name of your sheet)
-        template_sheet = template_wb['Sheet1']
-        # Add column names as headers in row 1
-        for col_index, col_name in enumerate(df.columns, start=1):
-            template_sheet.cell(row=1, column=col_index, value=col_name)
-        # Get data from the DataFrame
-        data = df.values.tolist()
-        # Write data into the template starting from a certain cell
-        for row_index, row_data in enumerate(data, start=2):
-            for col_index, cell_value in enumerate(row_data, start=1):
-                template_sheet.cell(row=row_index, column=col_index, value=cell_value)
-        # Save the file with the new data
-        template_wb.save(filename + '.xlsx')
-        print("Dataset successfully exported to " + filename + ".xlsx.")
-    except Exception as e:
-        print(f"Failed to export the dataset to {filename}.xlsx. Error: {e}")
-        try:
-            df.to_csv(filename + '.csv', index=False)
-            print("Dataset successfully exported to " + filename + ".csv")
-        except:
-            print(f"Failed to export the dataset to {filename}.csv.")
-
-def Swedish_coordinates(df):
-    # Retrieves a dataframe of location names and coordinates out of the main dataset
-    locations = df["location"].drop_duplicates()
-    latitudes = []
-    longitudes = []
-    i = 1
-    length = len(locations)
-    for location in locations:
-        print(f"Getting {i} of {length}: {location}")
-        coordinates = Get_coordinates(str(location) + ", Sweden")
-        latitudes.append(coordinates[0])
-        longitudes.append(coordinates[1])
-        i += 1
-    result = pd.DataFrame({"Location": locations, "Latitude": latitudes, "Longitude": longitudes})
-    return result
-
-def Get_coordinates(location_name):
-    # Returns latitude and longitude, found with help of Nominatim
-    geolocator = Nominatim(user_agent="my_geocoding_app")
-    location = geolocator.geocode(location_name)
-    if location:
-        latitude, longitude = location.latitude, location.longitude
-        return latitude, longitude
-    else:
-        print(f"Coordinates not found for {location_name}")
-        return (-9999, -9999)
-
-def Missing_data_rate(df, year):
-    # This function computes the average rate of missing data (NaN) in the features of each year
-    count_nan_per_column = df.isna().sum()
-    nan_per_column_rate = 100 * count_nan_per_column / len(df)
-    mean = nan_per_column_rate.filter(like=year).mean()
-    return mean
-
-def Group(df, feature, group, formula):
-    # Return a dataframe containing the value (mean variance or whatever) of each category (value of a certain feature), together with the number of their occurrences
-    # Values equal to -1 are filtered out.
-    result = df[df[feature] != -1].groupby(group)[feature].agg([formula, 'count']).reset_index()
-    result.rename(columns={formula: feature + '_' + formula, 'count': 'Occurrences'}, inplace=True)
-    return result
-
-def Scan_stat_variation(df, f1, f2, stat):
-    # Scans through the columns and evaluates the coefficient of variation of a certain stat (e. g. median) in two features.
-    # The function then prints wether first coefficient of variation is greater than the second one.
-    # The aim of this function is to get an idea of which feature the stat may be calculated towards.
-    # The reason behind this search is to find a good repalcement value for invalid data points.
-    # Since a stat may vary much depending by other features (in this case region_ID or category),
-    # it may be appropriate to replace the invalid data with a function of the feature with highest coefficient of variation, rather than a fixed value.
-    count = 0
-    for col in df.columns:
-        a = Group(df, col, f1, stat)
-        b = Group(df, col, f2, stat)
-        a_cv = 100 * (a.std()[col + "_" + stat]) / a.mean()[col + "_" + stat]
-        b_cv = 100 * (b.std()[col + "_" + stat]) / b.mean()[col + "_" + stat]
-        count += 1 * (a_cv > b_cv)
-        print(col, "\n", a_cv, b_cv, a_cv > b_cv, "\n")
-    print(f"The variability of {f1} is {int(100 * count / len(df.columns))}% of the times greater than {f2}")
+DATA_DIRECTORY = 'D:\Documents\Python Scripts\Scrapers\Bolagsskrapare\Raw data' # Folder containing the CSV files
+EARLIEST_YEAR = 2012
+FOLDER = "..\\"
+RAW_DATASET_FILENAME = "Swedish Ltd companies dataset 2016-2022.csv"
+CLEAN_DATASET_FILENAME = "Clean_data.csv"
+COORDINATES_FILENAME = "Swedish_location_coordinates.csv"
+EXPORT_CATEGORY_MAP = 'Category_map.csv'
+EXPORT_REGION_MAP = 'Region_map.csv'
+ENCODING = 'utf-16'
+MAX_ROWS = -1  # Use -1 for all rows
+N_LAT_BINS = 14
+N_LONG_BINS = 6
+EXPORT = False
 
 
 
 
 # INIT
-
 
 # List of features that have too many NaNs
 # The features that are included in the following list have been determined by means of this formula:
@@ -1533,20 +1047,516 @@ Activity_types_translation_table = {
     'Annonstidningsutgivning': 'Free Newspaper Publishing'
             }
 
-Folder = 'D:\Documents\Python Scripts\Scrapers\Bolagsskrapare\Raw data' # Folder containing the CSV files
 Max_rows = -1 # -1 = all
 Earliest_year = 2012 # Note: the data before 2016 is unfortunately mostly incomplete.
 Read_from_file = True
-# Raw_dataset_filename = "Swedish Ltd companies dataset 10000_2022.csv" # Narrow and long
-# Raw_dataset_filename = "Swedish Ltd companies dataset 2012-2022.csv" # Full
-Raw_dataset_filename = "Swedish Ltd companies dataset 2016-2022.csv" # Full, without "nan-years"
-# Raw_dataset_filename = "Swedish Ltd companies dataset 100_2016.csv" # Wide and very short
-Raw_dataset_filename = "Clean_data.csv"
+Raw_dataset_filename = FOLDER + CLEAN_DATASET_FILENAME
 # Specify how many regions will be defined
 N_lat_bins = 14
 N_long_bins = 6
 # If true, Export will allow to export category and region mappings, as well as the cleaned dataset to CSV files
-Export = False
+Export = True
+
+def Read_data(folder, max_rows, earliest_year):
+    # This function looks for .csv files in the folder, which are expected to contain the raw web-scraped data.
+    frames = [] # List of dataframes created out of each .csv
+    earliest_year
+    # Scan the folder to find all the files to be read
+    df = pd.DataFrame()
+    for file in os.listdir(folder):
+        if len(df) >= max_rows and max_rows != -1:
+            break
+        else:
+            if file.endswith('.csv'):
+                file_path = os.path.join(folder, file)
+                try:
+                    # Read the content of the CSV and put it in a dataframe
+                    print("Reading", file_path.split('\\')[-1])
+                    df = pd.read_csv(file_path, encoding=ENCODING, sep=';', on_bad_lines='skip', low_memory=False)
+                    frames.append(df)
+                except Exception as e:
+                    print(f"Error reading {file}: {e}")
+    # Merge all the dataframes
+    print("Concatenating dataframes...")
+    concatenated_raw_data = pd.concat(frames, ignore_index=True)
+    if max_rows == -1:
+        return concatenated_raw_data
+    elif max_rows >= 0:
+        return concatenated_raw_data.head(max_rows)
+    else:
+        print("Max rows error")
+        return concatenated_raw_data.head(0)
+
+def Data_cleaning_1(df, earliest_year, sorted_columns_translation_table, activity_types_translation_table):
+    # The purpose of this first cleaning is to clean the data to make it suitable for manual analysis.
+    # The process doesn't alter the content of the raw data.
+    # The data is processed only if the source isn't empty
+    if len(df):
+        # Remove the duplicates by using the organization number
+        print("Dropping duplicates...")
+        df = df.drop_duplicates(subset='orgnr')
+        # Sorting the columns to have the KPIs first
+        print("Sorting columns...")
+        sorted_columns = [col for col in list(sorted_columns_translation_table.keys()) if col in df.columns]
+        df = df[sorted_columns]
+
+        # Rename the columns with english names
+        print("Translating columns...")
+        df.columns = list(sorted_columns_translation_table.values())
+
+        # Translate the activity types in english
+        print("Translating activity types...")
+        df['category'] = df['category'].map(activity_types_translation_table)
+
+        # Drop some columns that have little meaning
+        drop_columns = ['orgnr', 'abv_hgrupp', 'linkTo', "Minoritetsintressen_2015", "Minoritetsintressen_2016", "Minoritetsintressen_2017", "Minoritetsintressen_2018", "Minoritetsintressen_2020"]
+        columns_to_drop = set(df.columns).intersection(drop_columns)
+        print("Dropping useless columns:", columns_to_drop)
+        df = df.drop(columns=columns_to_drop)
+
+        # Delete years columns that aren't requested
+        years_to_drop = list(map(str, range(2011, earliest_year)))
+        print("Dropping useless years:", years_to_drop)
+        df = df.loc[:, ~df.columns.str.endswith(tuple(years_to_drop))]
+
+        # Iterate over all columns and replace values only if they are strings and the column ends with a specific year
+        # Some columns containing percentage values are converted to integer
+        for col in df.columns:
+            if any(year in col for year in map(str, range(2011, 2023))):
+                print("Removing %, commas, spaces and converting to integers:", col)
+                # Remove the percentage symbol, replace comma with dot, and spaces with an empty string;
+                # finally, convert all values to integers. Note: percentage values are converted to integers taking into account the two decimal places present in the original data.
+                df[col] = df[col].apply(lambda x: pd.to_numeric(str(x).replace(' ', '').rstrip('%').replace(',', '.'), errors='coerce'))
+        return df
+
+def Data_cleaning_2(df, unrelevant_features, lat_bins = 10, long_bins = 2):
+    # This second cleaning process performs changes in the dataset.
+    # This function alters the original features, to make them more suitable for machine learning.
+    # Since the companies are uniquely identified by the new index, the juridical name is now useless and can be dropped
+    # Note: the default values of lat_bins and long_bins are meant to roughly match the number of swedish counties and resembles Sweden's oblong shape as well.
+    
+    print("Dropping juridical name...")
+    df = df.drop(["juridical name"], axis = 1)
+    
+    # The municipal seat is actually not very interesting, so it will be used only to fill the empty cells under "location", then dropped.
+    print("Merging location and municipal seat...")
+    df['location'] = df['location'].fillna(df["municipal seat"])
+    df = df.drop(["municipal seat"], axis = 1)
+
+    # Unfortunately there are several features that are mostly incomplete. For this reason, they are dropped rather than being completed
+    unrelevant_features = [col for col in unrelevant_features if col in df.columns]
+    print(f"Dropping unrelevant features: {unrelevant_features}")
+    df = df.drop(unrelevant_features, axis = 1)
+
+    # Status can be mapped to ordinals:
+    print("Converting status to ordinals...")
+    status_mapping = {"Bolaget är aktivt": 2, "Bolaget är inaktivt": 1, "Registrerad": -1} # -1 = only registered, probably recently bankrupted or liquidated
+    df['Status'] = df['Status'].map(status_mapping)
+    df = df.dropna(subset=['Status'])
+    
+    # The column with the registration date can be converted to an integer with just the year (month and day are not relevant for this dataset)
+    print("Converting company registration date to integer...")
+    df['registration year'] = pd.to_datetime(df['registration year'], errors='coerce').dt.year
+
+    # The ownership can also be mapped to ordinals:
+    print("Converting ownership to ordinals...")
+    ownership_mapping = {"Privat, ej börsnoterat": 1, "-": -1} # 1 = not in stock exchange; -1 = deregistered; everything else becomes nan
+    df['ownership'] = df['ownership'].map(ownership_mapping)
+    df['ownership'] = df['ownership'].fillna(0)
+
+    # The categories can be converted to ordinals
+    print("Converting categories to ordinals...")
+    category_mapping = {category: idx for idx, category in enumerate(df["category"].unique())}
+    df["category"] = df["category"].map(category_mapping)
+
+    # Managing the locations: the location feature can be replaced by two columns containing the corresponding coordinates.
+    # This can be done with the help of another dataframe, called Coordinates.
+    print("Replacing locations with coordinates...")
+    df = pd.merge(df, Coordinates[['Location', 'Latitude', 'Longitude']], left_on='location', right_on='Location', how='left')
+    df = df.drop(['location', 'Location'], axis=1)
+    df = df.rename(columns={'Latitude': 'latitude', 'Longitude': 'longitude'})
+    # For the purpose of machine learning, the exact coordinates aren't as meaningful as a coarse approximation can be
+    # The latitude is split into lat_bins bands, while the longitude into long_bins bands.
+    print("Grouping the coordinates into bins...")
+    latitude_bins = pd.cut(df['latitude'], bins=lat_bins, labels=False, include_lowest=True)
+    longitude_bins = pd.cut(df['longitude'], bins=long_bins, labels=False, include_lowest=True)
+    df['latitude_bin'] = latitude_bins
+    df['longitude_bin'] = longitude_bins
+    df = df.drop(['latitude', 'longitude'], axis=1)
+    # Convert latitude and longitude in a sort of univocal, scalar region code
+    print("Converting the coordinates bins into region codes...")
+    df['region_ID'] = df['latitude_bin'] * long_bins + df['longitude_bin']
+    # Then the regional code is remapped in order to have a series without gaps
+    region_ID_mapping = {region_ID: idx for idx, region_ID in enumerate(df["region_ID"].unique())}
+    df['region_ID'] = df['region_ID'].map(region_ID_mapping)
+    df = df.drop(['latitude_bin', 'longitude_bin'], axis=1)
+
+    # Delete all the rows that contain too many NaNs. Before counting the NaNs, it's good to replace all those ones which are caused by the recent registration of a company.
+    # Example: a company created in 2020 will have all the features related to earlier years set to NaN. This would inflate the count of NaNs illicitly.
+    for col in df.columns:
+        current_feature_split =col.split("_")
+        if "20" in col:
+            current_feature_year =  int(current_feature_split[-1])
+        else:
+            current_feature_year = 9999
+        # The features dealing with years before the registration year are set to 0. In this way, all their NaNs are replaced,
+        # while the NaNs in features with data from years after the registration year remain and will be handled later in the script.
+        df[col] = np.where(df['registration year'] > current_feature_year, 0, df[col])
+    # Now a new column with the count is created:
+    print("Deleting hollow companies...")
+    # Add a column (numbered 0) with the count of NaNs in each row.
+    df = pd.concat([df, df.isna().sum(axis=1)], axis=1)
+    # Then all the rows where NaNs are more than 33% the dataframe's width are deleted
+    df = df[df[0] <= int(len(df.columns) * 0.33)]
+    df = df.drop(0, axis=1)
+
+    # Delete all the years with too much missing data
+    print("Deleting hollow years...")
+    for year in range(2012, 2023):
+        missing_rate = Missing_data_rate(df, str(year))
+        if missing_rate >= 50:
+            columns_to_be_kept = df.filter(regex='^(?!.*_' + str(year) + '$)')
+            df = df.loc[:, columns_to_be_kept.columns]
+
+    # Remove "-" from the organization number, making it an integer
+    print("Converting organization numbers to integers...")
+    df.loc[:, "organization number"] = df["organization number"].str.replace("-", "").astype(np.int64)
+    # Set the organization number as index
+    print("Setting organization numbers as index...")
+    df.set_index(df.columns[0], inplace=True)
+
+    # Now it's time to fill all the empty data points. There are a bunch of criteria which are used according to a arbitrary hierarchy:
+    # 1) All the data points dealing with years before the corresponding registration year are set to 0 (done))
+    # 2) If the feature refers to a year and both the previous and the next years are available and have numbers, the replacement is the average of the two corresponding values in past and future.
+    # 3) If only the previous year is available, its corresponding value is used as the replacement.
+    # 4) If only the next year is available, its corresponding value is used as the replacement.
+    # 5) If there isn't adjacent and valid data, the replacement is the median value calculated on the subset with the same category.
+    # This is because the median values of each feature seem to greatly depend by the feature "category", so a fixed value wouldn't fit realistically as much as a specific value for certain subcategories.
+    # Note: this insight has been obtained with help of Scan_stat_variation function defined later.
+    # 6) If even the category median is a nan, the replacement is the general median over the whole current column.
+    print("Replacing nans...")
+    # The KPIs can be excluded from the column scan, since they can be calculated precisely out of the guessed source values instead of being guessed as well.
+    # This is done just for a matter of data consistency.
+    KPI_columns = pd.core.indexes.base.Index(['Net revenue per employee_2012',
+                                                'Net revenue per employee_2013',
+                                                'Net revenue per employee_2014',
+                                                'Net revenue per employee_2015',
+                                                'Net revenue per employee_2016',
+                                                'Net revenue per employee_2017',
+                                                'Net revenue per employee_2018',
+                                                'Net revenue per employee_2019',
+                                                'Net revenue per employee_2020',
+                                                'Net revenue per employee_2021',
+                                                'Net revenue per employee_2022',
+                                                'Personnel costs per employee_2012',
+                                                'Personnel costs per employee_2013',
+                                                'Personnel costs per employee_2014',
+                                                'Personnel costs per employee_2015',
+                                                'Personnel costs per employee_2016',
+                                                'Personnel costs per employee_2017',
+                                                'Personnel costs per employee_2018',
+                                                'Personnel costs per employee_2019',
+                                                'Personnel costs per employee_2020',
+                                                'Personnel costs per employee_2021',
+                                                'Personnel costs per employee_2022',
+                                                'EBITDA_2012',
+                                                'EBITDA_2013',
+                                                'EBITDA_2014',
+                                                'EBITDA_2015',
+                                                'EBITDA_2016',
+                                                'EBITDA_2017',
+                                                'EBITDA_2018',
+                                                'EBITDA_2019',
+                                                'EBITDA_2020',
+                                                'EBITDA_2021',
+                                                'EBITDA_2022',
+                                                'Net revenue change_2012',
+                                                'Net revenue change_2013',
+                                                'Net revenue change_2014',
+                                                'Net revenue change_2015',
+                                                'Net revenue change_2016',
+                                                'Net revenue change_2017',
+                                                'Net revenue change_2018',
+                                                'Net revenue change_2019',
+                                                'Net revenue change_2020',
+                                                'Net revenue change_2021',
+                                                'Net revenue change_2022',
+                                                'DuPont model_2012',
+                                                'DuPont model_2013',
+                                                'DuPont model_2014',
+                                                'DuPont model_2015',
+                                                'DuPont model_2016',
+                                                'DuPont model_2017',
+                                                'DuPont model_2018',
+                                                'DuPont model_2019',
+                                                'DuPont model_2020',
+                                                'DuPont model_2021',
+                                                'DuPont model_2022',
+                                                'Profit margin_2012',
+                                                'Profit margin_2013',
+                                                'Profit margin_2014',
+                                                'Profit margin_2015',
+                                                'Profit margin_2016',
+                                                'Profit margin_2017',
+                                                'Profit margin_2018',
+                                                'Profit margin_2019',
+                                                'Profit margin_2020',
+                                                'Profit margin_2021',
+                                                'Profit margin_2022',
+                                                'Gross profit margin_2012',
+                                                'Gross profit margin_2013',
+                                                'Gross profit margin_2014',
+                                                'Gross profit margin_2015',
+                                                'Gross profit margin_2016',
+                                                'Gross profit margin_2017',
+                                                'Gross profit margin_2018',
+                                                'Gross profit margin_2019',
+                                                'Gross profit margin_2020',
+                                                'Gross profit margin_2021',
+                                                'Gross profit margin_2022',
+                                                'Working capital/revenue_2012',
+                                                'Working capital/revenue_2013',
+                                                'Working capital/revenue_2014',
+                                                'Working capital/revenue_2015',
+                                                'Working capital/revenue_2016',
+                                                'Working capital/revenue_2017',
+                                                'Working capital/revenue_2018',
+                                                'Working capital/revenue_2019',
+                                                'Working capital/revenue_2020',
+                                                'Working capital/revenue_2021',
+                                                'Working capital/revenue_2022',
+                                                'Solvency_2012',
+                                                'Solvency_2013',
+                                                'Solvency_2014',
+                                                'Solvency_2015',
+                                                'Solvency_2016',
+                                                'Solvency_2017',
+                                                'Solvency_2018',
+                                                'Solvency_2019',
+                                                'Solvency_2020',
+                                                'Solvency_2021',
+                                                'Solvency_2022',
+                                                'Quick ratio_2012',
+                                                'Quick ratio_2013',
+                                                'Quick ratio_2014',
+                                                'Quick ratio_2015',
+                                                'Quick ratio_2016',
+                                                'Quick ratio_2017',
+                                                'Quick ratio_2018',
+                                                'Quick ratio_2019',
+                                                'Quick ratio_2020',
+                                                'Quick ratio_2021',
+                                                'Quick ratio_2022'
+                                                ])
+    for col in df.columns.difference(KPI_columns):
+        # Set current_feature_year according to the year contained in the current feature (column name)
+        # previous_feature_year and next_feature_year are calculated consequently.
+        current_feature_split = col.split("_")
+        if "20" in col:
+            current_feature_year = current_feature_split[-1]
+            previous_feature_year = current_feature_split[0] + "_" + str(int(current_feature_year) - 1)
+            next_feature_year = current_feature_split[0] + "_" + str(int(current_feature_year) + 1)
+        else:
+            current_feature_year = "9999"
+            previous_feature_year = "9999"
+            next_feature_year = "9999"
+        # If the current feature year has both a predecessor and a successor, the nans are possibly replaced by the average of these two values
+        if previous_feature_year in df.columns and next_feature_year in df.columns:
+            # Both the previous and the next year may exist for the current feature; however, one or both of them may be nans as well.
+            # This would mean to replace a nan with another nan.
+            replace_values = (df[previous_feature_year] + df[next_feature_year]) / 2
+            # Eventually either df[previous_feature_year] or df[next_feature_year] contain a nan, which causes a nan even in replace_values.
+            # A simple way to replace even these residual nans is to replace them with the average over all the years of the same feature type:
+            columns_to_average = [current_feature_split[0] + f"_{year}" for year in range(2012, 2023) if current_feature_split[0] + "_" + str(year) in df.columns]
+            replace_values = replace_values.fillna(df[columns_to_average].mean(axis = 1))
+            # Now that a series without nans has been obtained, it's time to use it to replace the nans in the main dataframe
+            df[col] = df[col].fillna(replace_values)
+        # Otherwise, the predecessor or the successor is used.
+        elif previous_feature_year in df.columns:
+            df[col] = df[col].fillna(df[previous_feature_year])
+            # However, even this series can contain nans, so this must be handled.
+            columns_to_average = [current_feature_split[0] + f"_{year}" for year in range(2012, 2023) if current_feature_split[0] + "_" + str(year) in df.columns]
+            replace_values = df[columns_to_average].mean(axis = 1)
+            df[col] = df[col].fillna(replace_values)
+        elif next_feature_year in df.columns:
+            df[col] = df[col].fillna(df[next_feature_year])
+            # However, even this series can contain nans, so this must be handled: the mean value of the whole row is used.
+            columns_to_average = [current_feature_split[0] + f"_{year}" for year in range(2012, 2023) if current_feature_split[0] + "_" + str(year) in df.columns]
+            replace_values = df[columns_to_average].mean(axis = 1).fillna(0) # In the case of a whole row of nans, the values are replaced with zeros.
+            df[col] = df[col].fillna(replace_values)
+        elif "20" in col:
+        # The case where no values in the closest years are available: the nans are here replaced by the median over the corresponding category
+        # This is because the median values for certain features are quite specific for the category the company belongs to.
+        # Note: this applies only to "year-features", so others like Status are skipped, since they all should have valid values already. 
+            # Create a dictionary with the medians of the current column, calculated over each category
+            category_median = df.groupby('category')[col].agg('median').to_dict()
+            # Map the category with the corresponding medians
+            mapped_category_median = df['category'].map(category_median)
+            # The mapped series just defined can be used to fill the nans, since both df[col] and mapped_category_median have the same indexes.
+            df[col] = df[col].fillna(mapped_category_median)
+            # However, especially if the dataset is little and thus there isn't valid data in a whole category, the median itself can be a nan.
+            # So, one more fill is needed, this time the general median value of the whole column.
+            # In case the whole row is made of nans, then the median would be a nan as well, so these are replaced by zeros.
+            df[col] = df[col].fillna(df[col].median()).fillna(0)
+            # At this point, it would be still possible to have nans left, if the whole column the median is calculated over is made of nans.
+            # However, such empty columns have already been dropped in the cleaning steps above.
+
+    # After having replaced all the nans, the remaining ones in the KPI columns can be calculated in this second column scan:
+    # As stated before, the features dealing with KPIs are calcutated out of other features; for consistency reasons, they can be calculated here,
+    # instead of estimating their value with the same criteria used for filling the nans in the other features.
+    KPI_df = pd.DataFrame()
+    for col in KPI_columns:
+        if col in df.columns:
+            current_feature_year = col.split("_")[-1]
+            # Each KPI is rebuilt by using the proper formulas
+            print("Updating", col)
+            if 'EBITDA' in col:
+                # EBITDA is calculated as EBIT before depreciation and amortization. Here the values are not recalculated, except when they are nan.
+                # Those nans are replaced with the corresponding EBIT
+                KPI_df[col] = df['EBITDA_' + current_feature_year].fillna(df['EBIT_' + current_feature_year])
+            elif 'Solvency' in col:
+                # Infinite solvencies are replaced with zeros or hundreds, depending by the sign
+                # Nans are due to years before the founding year, so the solvency is set to 100% by default, in such cases.
+                KPI_df[col] = round(100 * (df['Equity_' + current_feature_year] + 0.786 * df['Untaxed reserves_' + current_feature_year]) / df['Liabilities and equity_' + current_feature_year], 2).replace(-np.inf, 0).replace(np.inf, 100).fillna(100.0)
+            # The net revenue per employee might not be in the dataset because of it's often almost empty and so it's dropped previously by the algorithm
+            elif 'Net revenue per employee' in col:
+                # If there are no employees, the company is considered as it has one
+                Current_employees = df['Number of employees_' + current_feature_year].replace({0: 1})
+                KPI_df[col] = df['Net revenue_' + current_feature_year] / Current_employees
+            elif 'Net revenue change_' in col:
+                # Infinite changes are replaced by zeros;
+                # if either the previous or the current net revenues aren't available, the column is set to 0.
+                Current_net_revenue = 'Net revenue_' + current_feature_year
+                Previous_net_revenue = 'Net revenue_' + str(int(current_feature_year) - 1)
+                if Current_net_revenue in df.columns and Previous_net_revenue in df.columns:
+                    KPI_df[col] = round((df[Current_net_revenue] / df[Previous_net_revenue] - 1) * 100, 2).replace([np.inf, -np.inf], 0).fillna(0.0)
+                else:
+                    KPI_df[col] = pd.Series([0] * len(df), name = col, index = df.index)
+            elif 'DuPont model' in col:
+                # The Dupont model is calculated as Profit margin x Net revenue, divided by the sum of all the assets; NaNs are replaced with zeros,
+                # while -inf and inf are replaced with the double of the minimum value in the column and the maximum respectively.
+                # This is done to avoid infinite values that can't be fed in certain machine learning algorhitms but, at the same time, provide meaningful replacements.
+                Dupont_noinfs = df["Profit margin_" + current_feature_year] * df["Net revenue_" + current_feature_year] / (df["Subscribed unpaid capital_" + current_feature_year] + df["Fixed assets_" + current_feature_year] + df["Current assets_" + current_feature_year])
+                Dupont_noinfs = Dupont_noinfs.replace([-np.inf, np.inf], np.nan).dropna()
+                KPI_df[col] = round(df["Profit margin_" + current_feature_year] * df["Net revenue_" + current_feature_year] / (df["Subscribed unpaid capital_" + current_feature_year] + df["Fixed assets_" + current_feature_year] + df["Current assets_" + current_feature_year]), 2).replace(np.nan, 0).replace(-np.inf, 2 * min(Dupont_noinfs)).replace(np.inf, 2 * max(Dupont_noinfs))
+            elif 'Profit margin' in col:
+                # The source data seems to use mostly the EBIT to calculate the profit margin: 90% of the entries have a difference between generated and original within 1%.
+                # However, sometimes (maybe due to errors in the balance sheet) the profit margin seems to be calculated by using the profit after financial items.
+                KPI_df[col] = round(100 * df["EBIT_" + current_feature_year] / df["Net revenue_" + current_feature_year], 2).replace([np.nan, np.inf, -np.inf], 0)
+            elif 'Gross profit margin' in col:
+                # Nans in gross profit margin are usually due to lack of revenue and can't be calculated, so they are replaced with zeros
+                KPI_df[col] = df[col].fillna(0.0)
+            elif 'Working capital/revenue' in col:
+                # The working capital is defined as Current assets minus Short-term liabilities, divided by the net revenue.
+                # NaNs are replaced with zeros, while -inf and inf are replaced with the double of the minimum value in the column and the maximum respectively.
+                # This is done to avoid infinite values that can't be fed in certain machine learning algorhitms but, at the same time, provide meaningful replacements.
+                working_capital = df['Current assets_' + current_feature_year] - df['Short-term liabilities_' + current_feature_year]
+                working_capital_revenue = 100 * working_capital / df['Net revenue_' + current_feature_year]
+                working_capital_revenue_noinfs = working_capital_revenue.replace([-np.inf, np.inf], np.nan).dropna()
+                max_working_capital_revenue = max(working_capital_revenue_noinfs)
+                min_working_capital_revenue = min(working_capital_revenue_noinfs)
+                KPI_df[col] = round(working_capital_revenue.replace(-np.inf, 2 * min_working_capital_revenue).replace(np.inf, 2 * max_working_capital_revenue), 2).replace(np.nan, 0)
+            elif 'Quick ratio' in col:
+                # If there are no short-term liabilities, the quick ratio is set conventionally to 100%
+                KPI_df[col] = round((df['Current assets_' + current_feature_year] / df['Short-term liabilities_' + current_feature_year]).replace([np.inf, -np.inf, np.nan], 100), 2)
+            elif 'Personnel costs per employee' in col:
+                # The personnel costs' definition is company-dependent. It includes salary, social costs as well as other benefits that aren't available in this dataset.
+                # The principle applied here is to leave the values as they are and only replace the nans. The nans are replaced, where possible, with the mean value over the row of personnel costs per employee.
+                # If the mean personnel costs per employee is a nan as well (e. g. because all the items in the mean count are nans), it's replaced with 0.
+                mean_personnel_costs_per_employee = df.filter(like = 'Personnel costs per employee').mean(axis = 1).fillna(0)
+                KPI_df[col] = df['Personnel costs per employee_' + current_feature_year].fillna(mean_personnel_costs_per_employee)
+
+            # else:
+            #     print()
+            # Those who got a nan, because of e. g. division by zero, are set to zero
+    # Update the KPI columns in the main dataframe
+    df.update(KPI_df)
+    return df, category_mapping, region_ID_mapping, latitude_bins, longitude_bins
+
+def Excel_with_template(df, filename):
+    # Export to Excel by using a hard-coded file as a template
+    try:
+        template_path = 'Template.xlsx'
+        template_wb = load_workbook(template_path)
+        # Select or create a sheet in the template (replace 'Sheet1' with the name of your sheet)
+        template_sheet = template_wb['Sheet1']
+        # Add column names as headers in row 1
+        for col_index, col_name in enumerate(df.columns, start=1):
+            template_sheet.cell(row=1, column=col_index, value=col_name)
+        # Get data from the DataFrame
+        data = df.values.tolist()
+        # Write data into the template starting from a certain cell
+        for row_index, row_data in enumerate(data, start=2):
+            for col_index, cell_value in enumerate(row_data, start=1):
+                template_sheet.cell(row=row_index, column=col_index, value=cell_value)
+        # Save the file with the new data
+        template_wb.save(filename + '.xlsx')
+        print("Dataset successfully exported to " + filename + ".xlsx.")
+    except Exception as e:
+        print(f"Failed to export the dataset to {filename}.xlsx. Error: {e}")
+        try:
+            df.to_csv(filename + '.csv', index=False)
+            print("Dataset successfully exported to " + filename + ".csv")
+        except:
+            print(f"Failed to export the dataset to {filename}.csv.")
+
+def Swedish_coordinates(df):
+    # Retrieves a dataframe of location names and coordinates out of the main dataset
+    locations = df["location"].drop_duplicates()
+    latitudes = []
+    longitudes = []
+    i = 1
+    length = len(locations)
+    for location in locations:
+        print(f"Getting {i} of {length}: {location}")
+        coordinates = Get_coordinates(str(location) + ", Sweden")
+        latitudes.append(coordinates[0])
+        longitudes.append(coordinates[1])
+        i += 1
+    result = pd.DataFrame({"Location": locations, "Latitude": latitudes, "Longitude": longitudes})
+    return result
+
+def Get_coordinates(location_name):
+    # Returns latitude and longitude, found with help of Nominatim
+    geolocator = Nominatim(user_agent="my_geocoding_app")
+    location = geolocator.geocode(location_name)
+    if location:
+        latitude, longitude = location.latitude, location.longitude
+        return latitude, longitude
+    else:
+        print(f"Coordinates not found for {location_name}")
+        return (-9999, -9999)
+
+def Missing_data_rate(df, year):
+    # This function computes the average rate of missing data (NaN) in the features of each year
+    count_nan_per_column = df.isna().sum()
+    nan_per_column_rate = 100 * count_nan_per_column / len(df)
+    mean = nan_per_column_rate.filter(like=year).mean()
+    return mean
+
+def Group(df, feature, group, formula):
+    # Return a dataframe containing the value (mean variance or whatever) of each category (value of a certain feature), together with the number of their occurrences
+    # Values equal to -1 are filtered out.
+    result = df[df[feature] != -1].groupby(group)[feature].agg([formula, 'count']).reset_index()
+    result.rename(columns={formula: feature + '_' + formula, 'count': 'Occurrences'}, inplace=True)
+    return result
+
+def Scan_stat_variation(df, f1, f2, stat):
+    # Scans through the columns and evaluates the coefficient of variation of a certain stat (e. g. median) in two features.
+    # The function then prints wether first coefficient of variation is greater than the second one.
+    # The aim of this function is to get an idea of which feature the stat may be calculated towards.
+    # The reason behind this search is to find a good repalcement value for invalid data points.
+    # Since a stat may vary much depending by other features (in this case region_ID or category),
+    # it may be appropriate to replace the invalid data with a function of the feature with highest coefficient of variation, rather than a fixed value.
+    count = 0
+    for col in df.columns:
+        a = Group(df, col, f1, stat)
+        b = Group(df, col, f2, stat)
+        a_cv = 100 * (a.std()[col + "_" + stat]) / a.mean()[col + "_" + stat]
+        b_cv = 100 * (b.std()[col + "_" + stat]) / b.mean()[col + "_" + stat]
+        count += 1 * (a_cv > b_cv)
+        print(col, "\n", a_cv, b_cv, a_cv > b_cv, "\n")
+    print(f"The variability of {f1} is {int(100 * count / len(df.columns))}% of the times greater than {f2}")
 
 
 
@@ -1557,26 +1567,26 @@ print(str(datetime.datetime.today().hour) + ":" + str(datetime.datetime.today().
 if Read_from_file:
     print("Reading from", Raw_dataset_filename)
     if Max_rows != -1:
-        Clean_data = pd.read_csv(Raw_dataset_filename, index_col=False, encoding="utf-16").head(Max_rows)
+        Clean_data = pd.read_csv(Raw_dataset_filename, index_col=False, encoding=ENCODING).head(Max_rows)
     else:
-        Clean_data = pd.read_csv(Raw_dataset_filename, index_col=False, encoding="utf-16")
+        Clean_data = pd.read_csv(Raw_dataset_filename, index_col=False, encoding=ENCODING)
     Clean_data = Clean_data.drop(columns=["Unnamed: 0"])
 else:
-    print("Reading from folder", Folder)
-    Raw_data = Read_data(Folder, Max_rows, Earliest_year)
+    print("Reading from folder", DATA_DIRECTORY)
+    Raw_data = Read_data(DATA_DIRECTORY, Max_rows, Earliest_year)
     print(str(datetime.datetime.today().hour) + ":" + str(datetime.datetime.today().minute) + ":" + str(datetime.datetime.today().second))
     Clean_data = Data_cleaning_1(Raw_data, Earliest_year, Sorted_columns_translation_table, Activity_types_translation_table)
-    # Clean_data.to_csv("Swedish Ltd companies dataset " + str(Max_rows) + "_" + str(Earliest_year) + ".csv")
 print(str(datetime.datetime.today().hour) + ":" + str(datetime.datetime.today().minute) + ":" + str(datetime.datetime.today().second))
 
-Coordinates = pd.read_csv("Swedish_location_coordinates.csv", encoding="utf-16", sep=",")
+Coordinates = pd.read_csv(FOLDER + COORDINATES_FILENAME, encoding=ENCODING, sep=",")
 ML_data, Category_map, Region_map, Lat_bins, Long_bins = Data_cleaning_2(Clean_data, Unrelevant_features, N_lat_bins, N_long_bins)
 if Export:
-    pd.DataFrame(Category_map.items(), columns=['Category', 'Value']).to_csv('Category_map.csv')
-    pd.DataFrame(Category_map.items(), columns=['Region', 'Value']).to_csv('Region_map.csv')
+    pd.DataFrame(Category_map.items(), columns=['Category', 'Value']).to_csv(FOLDER + EXPORT_CATEGORY_MAP)
+    pd.DataFrame(Category_map.items(), columns=['Region', 'Value']).to_csv(FOLDER + EXPORT_REGION_MAP)
+    print("Writing to file...")
     if Max_rows != -1:
-        ML_data.to_csv(f"ML_data {N_lat_bins}x{N_long_bins} regions - {Max_rows} items.csv")
+        ML_data.to_csv(f"{FOLDER}ML_data {N_lat_bins}x{N_long_bins} regions - {Max_rows} items.csv")
     else:
-        ML_data.to_csv(f"ML_data {N_lat_bins}x{N_long_bins} regions.csv")
+        ML_data.to_csv(f"{FOLDER}ML_data {N_lat_bins}x{N_long_bins} regions.csv")
 
 print("Done!")

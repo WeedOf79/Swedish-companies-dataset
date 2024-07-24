@@ -11,174 +11,28 @@ import urllib.parse
 import random
 import subprocess
 
+# CONSTANTS
 
-
-
-def Log(Text, Print):
-    f = open("Log.txt", 'a')
-    try:
-        f.write(str(datetime.datetime.now()) + ":\t" + Text + "\n")
-    except:
-        f.write(str(datetime.datetime.now()) + ":\t**** UNMAPPABLE CHARACTER DETECTED ****\n")
-    f.close()
-    if Print:
-        print(str(datetime.datetime.now()) + ":\t" + Text + "\n")
-
-def wait_with_random_delay(base_delay):
-    # Generates a random number between Base_delay and 5 * Base_delay
-    random_delay = random.uniform(base_delay, 2 * base_delay)
-    # Adds an extra time of 30 seconds with a probability of 1 in (20 + random number between -10 and +10)
-    if random.randint(0, 200) == 0:
-        random_delay += random.randint(20, 40)
-        print(f"Time for a {int(random_delay)} seconds break!")
-        remaining_time = random_delay
-        while remaining_time >= 5:
-            time.sleep(5)
-            remaining_time -= 5
-            print(f"{int(remaining_time)} seconds left.")
-    else:
-        time.sleep(random_delay)
-    # Returns the actual waiting time
-    return random_delay
-
-def Clean_text(Text):
-    Text = Text.replace("\\u00e5", "å")
-    Text = Text.replace("\\u00c5", "Å")
-    Text = Text.replace("\\u00c4", "Ä")
-    Text = Text.replace("\\u00e4", "ä")
-    Text = Text.replace("\\u00f6", "ö")
-    Text = Text.replace("&amp;", "&")
-    Text = Text.replace("\"", "")
-    return Text
-
-def Retrieve_company_page_list(PC, P):
-    global Error_count
-    Result = pd.DataFrame()
-    try:
-        # Extracts the HTML code part related to the search results
-        Search_results_HTML = BeautifulSoup(PC, 'html.parser').find('search')[':search-result-default']
-        # From the HTML code, extract the JSON code that actually contains information about the companies.
-        # The page content is essentially JSON code, consisting of about twenty companies.
-        Search_results_JSON = json.loads(Search_results_HTML)
-        # Finally, the list of dictionaries created with json.loads is converted into a DataFrame
-        Result = pd.DataFrame(Search_results_JSON)
-    except Exception as e:
-        Log(f"Error retrieving page list at {PC}: {e}", True)
-    return Result
-
-def Get_closure_data(C, delay):
-    global Error_count
-    Max_attempts = 10
-    Name = str(C[1]["jurnamn"]).replace("&amp;", "&")
-    # The tables containing data from previous exercises are in a URL different from that shown in the browser
-    Closure_URL = "https://www.allabolag.se/" + str(C[1]['linkTo']).split("/")[0] + "/bokslut"
-    # The while loop allows you to attempt to access the page multiple times in case it fails on the first try
-    Succeeded = False
-    Attempt_number = 0
-    while not Succeeded and Attempt_number < Max_attempts:
-        Company_merged_data = pd.DataFrame()
-        Attempt_number = Attempt_number + 1
-        try:
-            # wait_with_random_delay(delay)
-            # All data from the page is placed in a list of dataframes:
-            Company_tables = pd.read_html(Closure_URL)
-            Succeeded = True
-        except:
-            # If the first attempt fails, try again after a short wait
-            time.sleep(Attempt_number * 1.5)
-            print("\t\t\tAttempt " + str(Attempt_number) + " to get data about " + Name + " failed. Retrying...")
-    # If accessing the data was not successful, log the error; otherwise, continue with cleaning the obtained data
-    if Attempt_number >= Max_attempts and not Succeeded:
-        Log("Data request error about " + Name, True)
-        Error_count = Error_count + 1
-    else:
-        try:
-            # Set names to the row labels using the data from the first column:
-            Company_tables[0].index = Company_tables[0]["Resultaträkning (tkr)"]
-            Company_tables[0].drop("Resultaträkning (tkr)", axis=1, inplace=True)
-            Company_tables[1].index = Company_tables[1]["Balansräkningar (tkr)"]
-            Company_tables[1].drop("Balansräkningar (tkr)", axis=1, inplace=True)
-            Company_tables[2].index = Company_tables[2]["Löner & utdelning (tkr)"]
-            Company_tables[2].drop("Löner & utdelning (tkr)", axis=1, inplace=True)
-            Company_tables[3].drop("Nyckeltal", axis=1, inplace=True)
-            # The index names are to be the same as those that will eventually become the columns of the dataset
-            Company_tables[3].index = KPIs
-            # Remove columns without actual data
-            Company_tables[1].drop(["Tillgångar", "Skulder, eget kapital och avsättningar"], inplace=True)
-            # The table with performance indices does not have column labels by itself. However, these are the same columns as the other tables.
-            # Simply assign column names to the performance index table to be able to integrate it correctly into Company_merged_data
-            Company_tables[3].columns = Company_tables[2].columns
-            Company_merged_data = pd.concat([Company_tables[0], Company_tables[1], Company_tables[2], Company_tables[3]])
-            # Typically, Company_merged_data has as its last column something called "Unnamed: ##", which contains only NaN. So remove it:
-            Company_merged_data = Company_merged_data[
-                Company_merged_data.columns.drop(list(Company_merged_data.filter(regex="Unnamed")))]
-        except:
-            Log("Error merging data about " + Name, True)
-            Error_count = Error_count + 1
-    # Since the fiscal years do not all end in the same month, depending on the company, there would be, for each year, a multitude of different indices (e.g., 2020-12, 2020-06, etc.).
-    # This would result in many columns of the final dataset almost empty, so here the indication of the month in the index name is eliminated:
-    Company_stacked_data = pd.DataFrame(Company_merged_data.stack())
-    Company_stacked_data.index = Company_stacked_data.index.map("_".join)
-    Shortened_index = []
-    for Index in Company_stacked_data.index:
-        Shortened_index.append(Index[:-3])
-    Company_stacked_data.index = Shortened_index
-    # However, there are cases of companies that have prepared multiple balance sheets in the same year. This results in columns with the same name, causing problems
-    # when it comes to pouring data into the final dataset.
-    # For simplicity, it is accepted to eliminate duplicate columns. Note: the "duplicated()" method only eliminates columns, so, if you want
-    # to eliminate rows, you need to do a double transpose before and after the elimination.
-    Result_df = Company_stacked_data.transpose().loc[:, ~Company_stacked_data.transpose().columns.duplicated()].transpose()
-    return Result_df
-
-def Get_activity_data(c, delay):
-    global Error_count
-    max_attempts = 10
-    name = str(c[1]["jurnamn"]).replace("&amp;", "&")
-    # The generic data about the activity are in another URL
-    activity_URL = "https://www.allabolag.se/" + str(c[1]['linkTo']).split("/")[0] + "/verksamhet"
-    # The while loop allows you to attempt to access the page multiple times in case it fails on the first try
-    succeeded = False
-    attempt_number = 0
-    activity_details = []
-    while not succeeded and attempt_number < max_attempts:
-        attempt_number = attempt_number + 1
-        try:
-            # wait_with_random_delay(delay)
-            soup = BeautifulSoup(requests.get(activity_URL).content, 'html.parser')
-            try:
-                status = soup.find('dt', string='Status').find_next('dd').get_text(strip=True)
-            except:
-                status = "-"
-            try:
-                registration_date = soup.find('dt', string='Bolaget registrerat').find_next('dd').get_text(strip=True)
-            except:
-                registration_date = "0000-01-01"
-            try:
-                ownership = soup.find('dt', string='Ägandeförhållande').find_next('dd').get_text(strip=True)
-            except:
-                ownership = "-"
-            try:
-                municipality = soup.find('dt', string='Kommunsäte').find_next('dd').get_text(strip=True)
-            except:
-                municipality = "-"
-            activity_details = pd.DataFrame({"Status": status, "Bolaget registrerat": registration_date, "Ägandeförhållande": ownership, "Kommunsäte": municipality}, index = [0])
-            # This dataframe has different columns time after time and generally the soup's structure looks different for e. g. deregistered companies. To get all the information in the right places would need
-            # a much more complex code. Since this seems to happen only with companies which aren't active anymore, the choice here is just to skip them as soon as the following check returns true:
-            try:
-                activity_details = activity_details[["Status", "Bolaget registrerat", "Ägandeförhållande", "Kommunsäte"]]
-            except:
-                # Sometimes the field "Kommunsäte" doesn't appear in the soup. This happens e. g. with companies that have gone in bankruptcy recently, as their web page looks a bit different.
-                # For these companies, the field is set to "-".
-                activity_details = activity_details[["Status", "Bolaget registrerat", "Ägandeförhållande"]]
-                activity_details = activity_details.copy()
-                activity_details.loc[0, "Kommunsäte"] = "-"
-            succeeded = True
-        except Exception as e:
-            # If the first attempt fails, try again after a short wait
-            time.sleep(2 + attempt_number * 1.5)
-            print("\t\t\tAttempt " + str(attempt_number) + " to get data about " + name + f" failed, due to '{e}'. Retrying...")
-            Log(f"Error retriveing activity data for {Name}: {e}", False)
-    return activity_details
+LOGFILE = "Log.txt"
+UNMAPPABLE_CHARACTER_MSG = "**** UNMAPPABLE CHARACTER DETECTED ****"
+BASE_URL = "https://www.allabolag.se/"
+MAX_ATTEMPTS = 10
+DATE_FORMAT = "%Y-%m-%d"
+TIME_FORMAT = "%H:%M:%S"
+STATUS_FIELD = "Status"
+REGISTRATION_DATE_FIELD = "Bolaget registrerat"
+OWNERSHIP_FIELD = "Ägandeförhållande"
+MUNICIPALITY_FIELD = "Kommunsäte"
+NORDIC_CHAR_REPLACEMENTS = {
+    "\\u00e5": "å",
+    "\\u00c5": "Å",
+    "\\u00c4": "Ä",
+    "\\u00e4": "ä",
+    "\\u00f6": "ö",
+    "&amp;": "&",
+    "\"": ""
+}
+RAW_DATA_FOLDER = "D:\\Documents\\Python Scripts\\Scrapers\\Bolagsskrapare\\Raw data\\"
 
 
 
@@ -190,7 +44,6 @@ List = []
 # Each page should contain identifiers for 20 different companies.
 Error_count = 0
 Delay = 0.0
-Raw_data_folder = "D:\Documents\Python Scripts\Scrapers\Bolagsskrapare\Raw data\\"
 Count = 0
 
 Company_dataset_columns = [
@@ -652,6 +505,134 @@ URLs = [
 
 
 
+def Log(text, print_to_console):
+    timestamp = datetime.datetime.now().strftime(f"{DATE_FORMAT} {TIME_FORMAT}")
+    with open(LOGFILE, 'a') as f:
+        try:
+            f.write(f"{timestamp}:\t{text}\n")
+        except:
+            f.write(f"{timestamp}:\t{UNMAPPABLE_CHARACTER_MSG}\n")
+    if print_to_console:
+        print(f"{timestamp}:\t{text}\n")
+
+def Wait_with_random_delay(base_delay):
+    random_delay = random.uniform(base_delay, 2 * base_delay)
+    if random.randint(0, 200) == 0:
+        random_delay += random.randint(20, 40)
+        print(f"Time for a {int(random_delay)} seconds break!")
+        remaining_time = random_delay
+        while remaining_time >= 5:
+            time.sleep(5)
+            remaining_time -= 5
+            print(f"{int(remaining_time)} seconds left.")
+    else:
+        time.sleep(random_delay)
+    return random_delay
+
+def Clean_text(text):
+    for old, new in NORDIC_CHAR_REPLACEMENTS.items():
+        text = text.replace(old, new)
+    return text
+
+def Retrieve_company_page_list(page_content, page):
+    global Error_count
+    result = pd.DataFrame()
+    try:
+        search_results_html = BeautifulSoup(page_content, 'html.parser').find('search')[':search-result-default']
+        search_results_json = json.loads(search_results_html)
+        result = pd.DataFrame(search_results_json)
+    except Exception as e:
+        Log(f"Error retrieving page list at {page_content}: {e}", True)
+    return result
+
+def Get_closure_data(company, delay):
+    global Error_count
+    name = str(company[1]["jurnamn"]).replace("&amp;", "&")
+    closure_url = f"{BASE_URL}{str(company[1]['linkTo']).split('/')[0]}/bokslut"
+    attempt_number = 0
+    succeeded = False
+    while not succeeded and attempt_number < MAX_ATTEMPTS:
+        company_merged_data = pd.DataFrame()
+        attempt_number += 1
+        try:
+            # wait_with_random_delay(delay)
+            company_tables = pd.read_html(closure_url)
+            succeeded = True
+        except:
+            time.sleep(attempt_number * 1.5)
+            print(f"\t\t\tAttempt {attempt_number} to get data about {name} failed. Retrying...")
+    if attempt_number >= MAX_ATTEMPTS and not succeeded:
+        Log(f"Data request error about {name}", True)
+        Error_count += 1
+    else:
+        try:
+            company_tables[0].index = company_tables[0]["Resultaträkning (tkr)"]
+            company_tables[0].drop("Resultaträkning (tkr)", axis=1, inplace=True)
+            company_tables[1].index = company_tables[1]["Balansräkningar (tkr)"]
+            company_tables[1].drop("Balansräkningar (tkr)", axis=1, inplace=True)
+            company_tables[2].index = company_tables[2]["Löner & utdelning (tkr)"]
+            company_tables[2].drop("Löner & utdelning (tkr)", axis=1, inplace=True)
+            company_tables[3].drop("Nyckeltal", axis=1, inplace=True)
+            company_tables[3].index = KPIs
+            company_tables[1].drop(["Tillgångar", "Skulder, eget kapital och avsättningar"], inplace=True)
+            company_tables[3].columns = company_tables[2].columns
+            company_merged_data = pd.concat([company_tables[0], company_tables[1], company_tables[2], company_tables[3]])
+            company_merged_data = company_merged_data[
+                company_merged_data.columns.drop(list(company_merged_data.filter(regex="Unnamed")))]
+        except:
+            Log(f"Error merging data about {name}", True)
+            Error_count += 1
+    company_stacked_data = pd.DataFrame(company_merged_data.stack())
+    company_stacked_data.index = company_stacked_data.index.map("_".join)
+    shortened_index = [index[:-3] for index in company_stacked_data.index]
+    company_stacked_data.index = shortened_index
+    result_df = company_stacked_data.transpose().loc[:, ~company_stacked_data.transpose().columns.duplicated()].transpose()
+    return result_df
+
+def Get_activity_data(company, delay):
+    global Error_count
+    name = str(company[1]["jurnamn"]).replace("&amp;", "&")
+    activity_url = f"{BASE_URL}{str(company[1]['linkTo']).split('/')[0]}/verksamhet"
+    attempt_number = 0
+    succeeded = False
+    activity_details = []
+    while not succeeded and attempt_number < MAX_ATTEMPTS:
+        attempt_number += 1
+        try:
+            # wait_with_random_delay(delay)
+            soup = BeautifulSoup(requests.get(activity_url).content, 'html.parser')
+            try:
+                status = soup.find('dt', string=STATUS_FIELD).find_next('dd').get_text(strip=True)
+            except:
+                status = "-"
+            try:
+                registration_date = soup.find('dt', string=REGISTRATION_DATE_FIELD).find_next('dd').get_text(strip=True)
+            except:
+                registration_date = "0000-01-01"
+            try:
+                ownership = soup.find('dt', string=OWNERSHIP_FIELD).find_next('dd').get_text(strip=True)
+            except:
+                ownership = "-"
+            try:
+                municipality = soup.find('dt', string=MUNICIPALITY_FIELD).find_next('dd').get_text(strip=True)
+            except:
+                municipality = "-"
+            activity_details = pd.DataFrame({STATUS_FIELD: status, REGISTRATION_DATE_FIELD: registration_date, OWNERSHIP_FIELD: ownership, MUNICIPALITY_FIELD: municipality}, index=[0])
+            try:
+                activity_details = activity_details[[STATUS_FIELD, REGISTRATION_DATE_FIELD, OWNERSHIP_FIELD, MUNICIPALITY_FIELD]]
+            except:
+                activity_details = activity_details[[STATUS_FIELD, REGISTRATION_DATE_FIELD, OWNERSHIP_FIELD]]
+                activity_details = activity_details.copy()
+                activity_details.loc[0, MUNICIPALITY_FIELD] = "-"
+            succeeded = True
+        except Exception as e:
+            time.sleep(2 + attempt_number * 1.5)
+            print(f"\t\t\tAttempt {attempt_number} to get data about {name} failed, due to '{e}'. Retrying...")
+            Log(f"Error retrieving activity data for {name}: {e}", False)
+    return activity_details
+
+
+
 
 # MAIN
 
@@ -664,78 +645,81 @@ for URL in URLs:
     # First, determine how many result pages exist for the given URL.
     # The following steps retrieve this number:
     Code_with_number_of_results = str(BeautifulSoup(requests.get(URL).content, 'html.parser').find('div', class_="page search-results"))
-    Number_of_results_approx_position = Code_with_number_of_results.find('"per_page":20,"prev_page_url":null,"to":20,"total":')
-    Number_of_pages = math.ceil(int(Code_with_number_of_results[Number_of_results_approx_position + 51:].split("}")[0]) / 20)
-    # Once the number of pages is calculated, iterate through them to find company names.
-    # They will be used later to search for specific data for each company (in a dedicated URL).
-    for Page in range(1, Number_of_pages):
-    # for Page in range(1, 2):
-        print("Getting data from page " + str(Page))
-        try:
-            Soup = BeautifulSoup(requests.get(URL + "?page=" + str(Page + 1)).content, 'html.parser')
-            Page_content = str(Soup.find('div', class_="page search-results"))
-        except:
-            # If the first attempt to access fails, make a second attempt after a short wait.
+    if Code_with_number_of_results != "None":
+        Number_of_results_approx_position = Code_with_number_of_results.find('"per_page":20,"prev_page_url":null,"to":20,"total":')
+        Number_of_pages = math.ceil(int(Code_with_number_of_results[Number_of_results_approx_position + 51:].split("}")[0]) / 20)
+        # Once the number of pages is calculated, iterate through them to find company names.
+        # They will be used later to search for specific data for each company (in a dedicated URL).
+        for Page in range(1, Number_of_pages):
+        # for Page in range(1, 2):
+            print("Getting data from page " + str(Page))
             try:
-                # wait_with_random_delay(Delay)
-                print("First attempt to read page " + str(Page) + " failed. Retrying...")
                 Soup = BeautifulSoup(requests.get(URL + "?page=" + str(Page + 1)).content, 'html.parser')
                 Page_content = str(Soup.find('div', class_="page search-results"))
-                print("Second attempt succeeded!")
-            except Exception as e:
-                Page_content = ""
-                Log(f"Error reading page {Page}: {e}", True)
-                Error_count = Error_count + 1
-        Company_page_list = Retrieve_company_page_list(Page_content, Page)
-        Data = pd.concat([Data, Company_page_list], axis=0)
-    # Remove columns of data from the web page that are not interesting
-    try:
-        Data = Data.drop(['ftgtyp', 'bolpres', 'companyPresentation', 'score', 'remarks', 'hasremarks', 'relatedmetadata', 'hasrelatedmetadata', 'status'], axis=1)
-    except:
-        Log("Column drop error at " + Unquoted_URL[6] + "/.../" + Unquoted_URL[-1], True)
-        Error_count = Error_count + 1
-
-    # For each company in Data, visit the dedicated web page to integrate its data
-    Company_dataset = pd.DataFrame(columns=Company_dataset_columns)
-    Company_dataset = pd.concat([Company_dataset, Data], join="outer", ignore_index=True)
-    Company_dataset.index = Company_dataset["jurnamn"]
-    Company_dataset.drop(["jurnamn"], axis=1, inplace=True)
-    # Now, Company_dataset contains the basic data of a page of companies, with several columns related to exercises that need to be filled
-    for Company in Data.iterrows():
-        Count = Count + 1
-        Name = Company[1]["jurnamn"].replace("&amp;", "&")
-        Company_DF = pd.DataFrame(Company[1]).transpose()
-        Company_DF.index = [Name]
-        Company_DF.drop(["jurnamn"], axis=1, inplace=True)
-        Company_activity_data = Get_activity_data(Company, Delay)
-        Company_activity_data.set_index(Company_DF.index)
-        Company_activity_data.index = [Name]
-        # Assign the same index to Company_closure_data as the row with the same orgnr in Company_dataset:
-        Company_closure_data = Get_closure_data(Company, Delay)
-        Company_closure_data.columns = [Name]
-        # The content of Company_closure_data integrates Company_dataset, making it complete. To do this, you need to find the row
-        # of Company_dataset corresponding to it. This can be done, for example, by looking for the one that contains the same "orgnr".
+            except:
+                # If the first attempt to access fails, make a second attempt after a short wait.
+                try:
+                    # wait_with_random_delay(Delay)
+                    print("First attempt to read page " + str(Page) + " failed. Retrying...")
+                    Soup = BeautifulSoup(requests.get(URL + "?page=" + str(Page + 1)).content, 'html.parser')
+                    Page_content = str(Soup.find('div', class_="page search-results"))
+                    print("Second attempt succeeded!")
+                except Exception as e:
+                    Page_content = ""
+                    Log(f"Error reading page {Page}: {e}", True)
+                    Error_count = Error_count + 1
+            Company_page_list = Retrieve_company_page_list(Page_content, Page)
+            Data = pd.concat([Data, Company_page_list], axis=0)
+        # Remove columns of data from the web page that are not interesting
         try:
-            print(str(Count) + "\t\t" + Name)
-            # This makes it easy to replace the content of Company_dataset with that of Company_closure_data and Company_activity_data:
-            Company_dataset.loc[Company_DF.index, :] = pd.concat([Company_DF, Company_activity_data, Company_closure_data.transpose()], axis=1)
+            Data = Data.drop(['ftgtyp', 'bolpres', 'companyPresentation', 'score', 'remarks', 'hasremarks', 'relatedmetadata', 'hasrelatedmetadata', 'status'], axis=1)
         except:
-            Log("Error merging data for " + Name, True)
+            Log("Column drop error at " + Unquoted_URL[6] + "/.../" + Unquoted_URL[-1], True)
             Error_count = Error_count + 1
-    # Replace "&amp;", which may interfere with CSV generation
-    Company_dataset.replace({"&amp;": "&"}, regex=True, inplace=True)
-    
-    # Now that Final_dataset contains all the information for each company, it's time to write the result to a file
-    try:
-        Filename = "Company_data " + Unquoted_URL[6] + " - " + Unquoted_URL[-1] + " - " + str(datetime.date.today().year) + str(
-            datetime.date.today().month) + str(datetime.date.today().day) + "-" + str(
-            datetime.datetime.today().hour) + str(datetime.datetime.today().minute) + str(
-            datetime.datetime.today().second) + ".csv"
-        Company_dataset.to_csv(Raw_data_folder + Filename, sep=";", encoding="utf-16")
-        Log(Filename + " successfully written.", True)
-    except:
-        Log("CSV write error.", True)
-        Error_count = Error_count + 1
+
+        # For each company in Data, visit the dedicated web page to integrate its data
+        Company_dataset = pd.DataFrame(columns=Company_dataset_columns)
+        Company_dataset = pd.concat([Company_dataset, Data], join="outer", ignore_index=True)
+        Company_dataset.index = Company_dataset["jurnamn"]
+        Company_dataset.drop(["jurnamn"], axis=1, inplace=True)
+        # Now, Company_dataset contains the basic data of a page of companies, with several columns related to exercises that need to be filled
+        for Company in Data.iterrows():
+            Count = Count + 1
+            Name = Company[1]["jurnamn"].replace("&amp;", "&")
+            Company_DF = pd.DataFrame(Company[1]).transpose()
+            Company_DF.index = [Name]
+            Company_DF.drop(["jurnamn"], axis=1, inplace=True)
+            Company_activity_data = Get_activity_data(Company, Delay)
+            Company_activity_data.set_index(Company_DF.index)
+            Company_activity_data.index = [Name]
+            # Assign the same index to Company_closure_data as the row with the same orgnr in Company_dataset:
+            Company_closure_data = Get_closure_data(Company, Delay)
+            Company_closure_data.columns = [Name]
+            # The content of Company_closure_data integrates Company_dataset, making it complete. To do this, you need to find the row
+            # of Company_dataset corresponding to it. This can be done, for example, by looking for the one that contains the same "orgnr".
+            try:
+                print(str(Count) + "\t\t" + Name)
+                # This makes it easy to replace the content of Company_dataset with that of Company_closure_data and Company_activity_data:
+                Company_dataset.loc[Company_DF.index, :] = pd.concat([Company_DF, Company_activity_data, Company_closure_data.transpose()], axis=1)
+            except:
+                Log("Error merging data for " + Name, True)
+                Error_count = Error_count + 1
+        # Replace "&amp;", which may interfere with CSV generation
+        Company_dataset.replace({"&amp;": "&"}, regex=True, inplace=True)
+        
+        # Now that Final_dataset contains all the information for each company, it's time to write the result to a file
+        try:
+            Filename = "Company_data " + Unquoted_URL[6] + " - " + Unquoted_URL[-1] + " - " + str(datetime.date.today().year) + str(
+                datetime.date.today().month) + str(datetime.date.today().day) + "-" + str(
+                datetime.datetime.today().hour) + str(datetime.datetime.today().minute) + str(
+                datetime.datetime.today().second) + ".csv"
+            Company_dataset.to_csv(RAW_DATA_FOLDER + Filename, sep=";", encoding="utf-16")
+            Log(Filename + " successfully written.", True)
+        except:
+            Log("CSV write error.", True)
+            Error_count = Error_count + 1
+    else:
+        Log(f"Unable to retrieve the number of results in {URL}. Skipping...", True)
 Log("Error count = " + str(Error_count) + "\nTotal companies analyzed: " + str(Count), True)
 Log("**************** END ****************\n\n", False)
-subprocess.run(["shutdown", "/h"])
+# subprocess.run(["shutdown", "/h"])

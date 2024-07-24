@@ -4,6 +4,28 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from adjustText import adjust_text
 
+
+
+
+# Constants
+FILE_ENCODING = 'utf-16'
+FOLDER = "..\\"
+CLEAN_DATA_FILE = 'Clean_data.csv'
+ORG_NUM_FILE = "Swedish company organization numbers.csv"
+UNNAMED_COL = 'Unnamed: 0'
+ORGANIZATION_NUMBER_COL = 'organization number'
+JURIDICAL_NAME_COL = 'juridical name'
+QUICK_RATIO_2022 = 'Quick ratio_2022'
+SOLVENCY_2022 = 'Solvency_2022'
+NUM_EMPLOYEES_2022 = 'Number of employees_2022'
+REGION_ID_COL = 'region_ID'
+CATEGORY_COL = 'category'
+UPPSALA_LOCATION = 'Uppsala'
+PAINTING_WORKS_CATEGORY = 'Painting Works'
+
+
+
+
 # Retrieve the top n companies with highest increase of feature between the specified years
 def Top_growing(dataframe, feature, year1, year2, n, ont):
     # Copy the DataFrame to avoid SettingWithCopyWarning
@@ -675,52 +697,27 @@ Activity_types_translation_table = {
             }
 
 
-Data = pd.read_csv('Clean_data.csv', encoding = 'utf-16')
+# Load data
+Data = pd.read_csv(FOLDER + CLEAN_DATA_FILE, encoding=FILE_ENCODING)
 # Data = pd.read_csv("ML_data 21x9 regions.csv")
 
-organization_number_translation = pd.read_csv("Swedish company organization numbers.csv").drop('Unnamed: 0', axis=1)
-organization_number_translation['organization number'] = organization_number_translation['organization number'].str.replace("-", "")
-organization_number_translation = organization_number_translation.set_index('organization number')['juridical name']
-
-def imbianchini_sfigati(df):
-    median_quick_ratio = df['Quick ratio_2022'].median()
-    median_solvency = df['Solvency_2022'].median()
-    plt.figure(figsize=(12, 8))
-    # If certain conditions are verified, the point is marked with a red dot; a blue square otherwise
-    for i, row in df.iterrows():
-        if row['Quick ratio_2022'] > median_quick_ratio and row['Solvency_2022'] > median_solvency:
-            color = 'green'
-            marker = 'o'
-        elif row['Quick ratio_2022'] < median_quick_ratio and row['Solvency_2022'] < median_solvency:
-            color = 'red'
-            marker = 's'
-        else:
-            color = 'black'
-        plt.scatter(row['Solvency_2022'], row['Quick ratio_2022'], label=row['juridical name'], c=color, alpha=0.7, marker=marker)
-    plt.xlabel('Solvency_2022')
-    plt.ylabel('Quick ratio_2022')
-    plt.xlim(-25, 100)
-    plt.ylim(0, 800)
-    # Adjust_text to handle overlapping labels
-    texts = [plt.text(row['Solvency_2022'], row['Quick ratio_2022'], row['juridical name'], fontsize=6) for i, row in df.iterrows()]
-    adjust_text(texts)
-    plt.show()
+# Load organization number translation
+organization_number_translation = pd.read_csv(FOLDER + ORG_NUM_FILE).drop(UNNAMED_COL, axis=1)
+organization_number_translation[ORGANIZATION_NUMBER_COL] = organization_number_translation[ORGANIZATION_NUMBER_COL].str.replace("-", "")
+organization_number_translation = organization_number_translation.set_index(ORGANIZATION_NUMBER_COL)[JURIDICAL_NAME_COL]
 
 def Similar(df, region, category, n_employees):
-    # Returns a subdataset of companies which belong the same region, the same category and, if specified by a positive number, the same number of employees
+    # Returns a subdataset of companies which belong to the same region, the same category and, if specified by a positive number, the same number of employees
     if n_employees > 0 and category >= 0:
-        return df[(df['region_ID'] == region) & (df['category'] == category) & (df['Number of employees_2022'] == n_employees)]
+        return df[(df[REGION_ID_COL] == region) & (df[CATEGORY_COL] == category) & (df[NUM_EMPLOYEES_2022] == n_employees)]
     elif n_employees < 0 and category >= 0:
-        return df[(df['region_ID'] == region) & (df['category'] == category)]
+        return df[(df[REGION_ID_COL] == region) & (df[CATEGORY_COL] == category)]
     elif n_employees > 0 and category < 0:
-        return df[(df['region_ID'] == region) & (df['Number of employees_2022'] == n_employees)]
+        return df[(df[REGION_ID_COL] == region) & (df[NUM_EMPLOYEES_2022] == n_employees)]
     else:
-        return df[(df['region_ID'] == region)]
-
-
-
+        return df[(df[REGION_ID_COL] == region)]
 
 # MAIN
 
-Uppsala_paintworks = Data[(Data['location'] == 'Uppsala') & (Data['category'] == 'Painting Works')][['organization number', 'juridical name', 'Quick ratio_2022', 'Solvency_2022', "Number of employees_2022"]].dropna()
-Plot_list(Uppsala_paintworks.head(15), "Solvency_2022", "Quick ratio_2022", "Number of employees_2022", organization_number_translation, 1, 0.33)
+Uppsala_paintworks = Data[(Data['location'] == UPPSALA_LOCATION) & (Data[CATEGORY_COL] == PAINTING_WORKS_CATEGORY)][[ORGANIZATION_NUMBER_COL, JURIDICAL_NAME_COL, QUICK_RATIO_2022, SOLVENCY_2022, NUM_EMPLOYEES_2022]].dropna()
+Plot_list(Uppsala_paintworks.head(15), SOLVENCY_2022, QUICK_RATIO_2022, NUM_EMPLOYEES_2022, organization_number_translation, 1, 0.33)
